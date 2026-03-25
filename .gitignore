@@ -1,0 +1,9 @@
+build/
+*.o
+*.a
+*.so
+mini_unionfs
+.vscode/
+.vscode-server/
+.DS_Store
+unionfs_test_env/
