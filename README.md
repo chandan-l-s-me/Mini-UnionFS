@@ -78,8 +78,7 @@ umount /tmp/mnt_test          # On macOS
 Choose the right guide for your needs:
 
 | Document | Purpose |
-|----------|---------|
-| **[QUICK_START.md](docs/QUICK_START.md)** | ⚡ 5-minute getting started guide with examples |
+|----------|---------|| **[MACOS_GUIDE.md](docs/MACOS_GUIDE.md)** | 🍎 **Running on macOS** - VM setup and alternatives || **[QUICK_START.md](docs/QUICK_START.md)** | ⚡ 5-minute getting started guide with examples |
 | **[DESIGN.md](docs/DESIGN.md)** | 📐 Complete architecture and implementation details |
 | **[API.md](docs/API.md)** | 📚 Function reference and developer guide |
 | **[BUILD.md](docs/BUILD.md)** | 🔨 Detailed build instructions for all platforms |
@@ -176,11 +175,19 @@ sudo dnf install fuse-devel gcc
 make
 ```
 
-### macOS (if FUSE for macOS installed)
-```bash
-brew install macfuse
-make
-```
+### macOS (Use Linux VM)
+
+⚠️ **FUSE is not natively available on macOS**
+
+See [docs/MACOS_GUIDE.md](docs/MACOS_GUIDE.md) for:
+- Setting up a free Linux VM (VirtualBox/UTM) - **Recommended**
+- Using WSL2 on Windows
+- Native macOS options (not recommended)
+
+**Quick macOS path:**
+1. Download free VirtualBox
+2. Create Ubuntu 22.04 VM (5 min)
+3. Run: `sudo apt-get install libfuse-dev build-essential && make && make test`
 
 ## Troubleshooting
 

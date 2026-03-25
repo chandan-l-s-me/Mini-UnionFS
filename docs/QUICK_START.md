@@ -26,9 +26,11 @@ cat /tmp/lower/file.txt         # Should print: hello (unchanged)
 fusermount -u /tmp/mnt
 ```
 
+> **🍎 On macOS?** FUSE is not natively available. See [MACOS_GUIDE.md](MACOS_GUIDE.md) for how to run on macOS using a free Linux VM. Alternatively, follow the instructions below on Linux or WSL2.
+
 ## Prerequisites
 
-### For Ubuntu/Debian:
+### For Ubuntu/Debian (Ubuntu 22.04 LTS):
 ```bash
 sudo apt-get update
 sudo apt-get install -y build-essential libfuse-dev
