@@ -62,11 +62,28 @@ umount /tmp/mnt_test          # On macOS
 ├── tests/
 │   └── test_unionfs.sh      # Automated test suite
 ├── docs/
-│   └── DESIGN.md            # Comprehensive design document
+│   ├── DESIGN.md            # Comprehensive design document
+│   ├── API.md               # API reference
+│   ├── BUILD.md             # Build instructions
+│   └── QUICK_START.md       # Quick start guide
 ├── Makefile                 # Build configuration
 ├── README.md                # This file
+├── PROJECT_SUMMARY.md       # Project deliverables overview
+├── build.sh                 # Build helper script
 └── .gitignore              # Git ignore patterns
 ```
+
+## Documentation
+
+Choose the right guide for your needs:
+
+| Document | Purpose |
+|----------|---------|
+| **[QUICK_START.md](docs/QUICK_START.md)** | ⚡ 5-minute getting started guide with examples |
+| **[DESIGN.md](docs/DESIGN.md)** | 📐 Complete architecture and implementation details |
+| **[API.md](docs/API.md)** | 📚 Function reference and developer guide |
+| **[BUILD.md](docs/BUILD.md)** | 🔨 Detailed build instructions for all platforms |
+| **[PROJECT_SUMMARY.md](PROJECT_SUMMARY.md)** | ✅ Deliverables checklist and project overview |
 
 ## Design Highlights
 
