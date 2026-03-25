@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <dirent.h>
 #include <limits.h>
+#include <libgen.h>
 
 /* Global state */
 struct mini_unionfs_state {
@@ -35,6 +36,7 @@ int resolve_path(const char *path, char *resolved_path, int *layer) {
     char upper_path[MAX_PATH_LEN];
     char lower_path[MAX_PATH_LEN];
     char whiteout_path[MAX_PATH_LEN];
+    char parent_upper[MAX_PATH_LEN];
 
     if (!path || path[0] != '/') {
         return -EINVAL;
@@ -49,8 +51,15 @@ int resolve_path(const char *path, char *resolved_path, int *layer) {
     if (basename == NULL) basename = path;
     else basename++;
 
-    snprintf(whiteout_path, MAX_PATH_LEN, "%s/%s%s", 
-             dirname(upper_path), WHITEOUT_PREFIX, basename);
+    /* Get parent directory properly */
+    strcpy(parent_upper, upper_path);
+    char *parent_ptr = parent_upper;
+    char *last_slash = strrchr(parent_ptr, '/');
+    if (last_slash != NULL) {
+        *last_slash = '\0';
+    }
+
+    snprintf(whiteout_path, MAX_PATH_LEN, "%s/.wh.%s", parent_ptr, basename);
 
     if (lstat(whiteout_path, &st) == 0) {
         /* Whiteout file exists - file is deleted */
@@ -83,19 +92,31 @@ int is_whiteouted(const char *path) {
     struct mini_unionfs_state *data = UNIONFS_DATA;
     struct stat st;
     char whiteout_path[MAX_PATH_LEN];
+    char parent_path[MAX_PATH_LEN];
     
     const char *basename = strrchr(path, '/');
     if (basename == NULL) basename = path;
     else basename++;
 
-    char parent_dir[MAX_PATH_LEN];
-    strcpy(parent_dir, path);
-    char *parent = dirname(parent_dir);
+    /* Get parent directory */
+    strcpy(parent_path, path);
+    char *last_slash = strrchr(parent_path, '/');
+    if (last_slash != NULL && last_slash != parent_path) {
+        *last_slash = '\0';
+    } else {
+        strcpy(parent_path, "/");
+    }
 
     snprintf(whiteout_path, MAX_PATH_LEN, "%s/%s%s",
-             (parent[0] == '/' && parent[1] == '\0') ? 
-             data->upper_dir : data->upper_dir,
-             WHITEOUT_PREFIX, basename);
+             data->upper_dir, parent_path[1] ? parent_path : "", basename);
+
+    /* Handle root directory case */
+    if (strcmp(parent_path, "/") == 0) {
+        snprintf(whiteout_path, MAX_PATH_LEN, "%s/.wh.%s", data->upper_dir, basename);
+    } else {
+        snprintf(whiteout_path, MAX_PATH_LEN, "%s%s/.wh.%s", 
+                 data->upper_dir, parent_path, basename);
+    }
 
     return (lstat(whiteout_path, &st) == 0) ? 1 : 0;
 }
@@ -139,6 +160,7 @@ int copy_file(const char *src, const char *dest) {
     char buf[4096];
     ssize_t bytes;
     struct stat st;
+    char dest_dir_path[MAX_PATH_LEN];
 
     /* Get source file stats */
     if (stat(src, &st) == -1) {
@@ -146,13 +168,15 @@ int copy_file(const char *src, const char *dest) {
     }
 
     /* Ensure parent directory exists */
-    char *dest_copy = strdup(dest);
-    char *dest_dir = dirname(dest_copy);
-    struct stat dir_st;
-    if (lstat(dest_dir, &dir_st) != 0) {
-        mkdir(dest_dir, 0755);
+    strcpy(dest_dir_path, dest);
+    char *last_slash = strrchr(dest_dir_path, '/');
+    if (last_slash != NULL && last_slash != dest_dir_path) {
+        *last_slash = '\0';
+        struct stat dir_st;
+        if (lstat(dest_dir_path, &dir_st) != 0) {
+            mkdir(dest_dir_path, 0755);
+        }
     }
-    free(dest_copy);
 
     /* Open source */
     src_fd = open(src, O_RDONLY);
@@ -189,6 +213,7 @@ static int unionfs_getattr(const char *path, struct stat *stbuf,
                            struct fuse_file_info *fi) {
     char resolved_path[MAX_PATH_LEN];
     int layer;
+    (void) fi;
 
     int ret = resolve_path(path, resolved_path, &layer);
     if (ret != 0) {
@@ -247,6 +272,7 @@ static int unionfs_read(const char *path, char *buf, size_t size, off_t offset,
     int layer;
     int fd;
     int ret;
+    (void) fi;
 
     ret = resolve_path(path, resolved_path, &layer);
     if (ret != 0) {
@@ -272,6 +298,7 @@ static int unionfs_write(const char *path, const char *buf, size_t size,
     int layer;
     int fd;
     int ret;
+    (void) fi;
 
     /* Check current state */
     int resolve_ret = resolve_path(path, resolved_path, &layer);
@@ -317,6 +344,8 @@ static int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     DIR *upper_dir = NULL;
     DIR *lower_dir = NULL;
     struct dirent *entry;
+    (void) offset;
+    (void) fi;
 
     snprintf(upper_path, MAX_PATH_LEN, "%s%s", data->upper_dir, path);
     snprintf(lower_path, MAX_PATH_LEN, "%s%s", data->lower_dir, path);
@@ -368,8 +397,8 @@ static int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
             /* Skip if whiteouted */
             char whiteout_check[MAX_PATH_LEN];
-            snprintf(whiteout_check, MAX_PATH_LEN, "%s/%s%s", 
-                     upper_path, WHITEOUT_PREFIX, entry->d_name);
+            snprintf(whiteout_check, MAX_PATH_LEN, "%s/.wh.%s", 
+                     upper_path, entry->d_name);
             if (lstat(whiteout_check, &st) == 0) {
                 continue;
             }
@@ -386,6 +415,7 @@ static int unionfs_create(const char *path, mode_t mode, struct fuse_file_info *
     struct mini_unionfs_state *data = UNIONFS_DATA;
     char upper_path[MAX_PATH_LEN];
     int fd;
+    (void) fi;
 
     snprintf(upper_path, MAX_PATH_LEN, "%s%s", data->upper_dir, path);
 
@@ -409,6 +439,7 @@ static int unionfs_unlink(const char *path) {
     char resolved_path[MAX_PATH_LEN];
     char upper_path[MAX_PATH_LEN];
     char whiteout_path[MAX_PATH_LEN];
+    char parent_upper[MAX_PATH_LEN];
     int layer;
     int ret;
 
@@ -438,12 +469,14 @@ static int unionfs_unlink(const char *path) {
         if (basename == NULL) basename = path;
         else basename++;
 
-        char parent_upper[MAX_PATH_LEN];
         strcpy(parent_upper, upper_path);
-        char *parent_ptr = dirname(parent_upper);
+        char *last_slash = strrchr(parent_upper, '/');
+        if (last_slash != NULL) {
+            *last_slash = '\0';
+        }
         
-        snprintf(whiteout_path, MAX_PATH_LEN, "%s/%s%s",
-                 parent_ptr, WHITEOUT_PREFIX, basename);
+        snprintf(whiteout_path, MAX_PATH_LEN, "%s/.wh.%s",
+                 parent_upper, basename);
 
         int fd = open(whiteout_path, O_WRONLY | O_CREAT, 0644);
         if (fd == -1) {
