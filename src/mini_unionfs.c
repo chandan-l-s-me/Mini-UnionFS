@@ -1,5 +1,4 @@
-#define FUSE_USE_VERSION 31
-
+#define FUSE_USE_VERSION 26
 #include <fuse.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,647 +7,286 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <dirent.h>
-#include <limits.h>
-#include <libgen.h>
 
-/* Global state */
+#define MAX_PATH_LEN 4096
+#define WHITEOUT_PREFIX ".wh."
+
 struct mini_unionfs_state {
     char *lower_dir;
     char *upper_dir;
 };
 
 #define UNIONFS_DATA ((struct mini_unionfs_state *) fuse_get_context()->private_data)
-#define WHITEOUT_PREFIX ".wh."
-#define MAX_PATH_LEN 4096
 
-/* ======================== Helper Functions ======================== */
+/* ================= HELPERS ================= */
 
-/**
- * Resolve the actual path and determine which layer the file is in.
- * Returns: 0 on success, -errno on error
- * layer: 1 = upper, 2 = lower, 0 = not found or whiteouted
- */
-int resolve_path(const char *path, char *resolved_path, int *layer) {
+int resolve_path(const char *path, char *resolved, int *layer) {
     struct mini_unionfs_state *data = UNIONFS_DATA;
     struct stat st;
-    char upper_path[MAX_PATH_LEN];
-    char lower_path[MAX_PATH_LEN];
-    char whiteout_path[MAX_PATH_LEN];
-    char parent_upper[MAX_PATH_LEN];
 
-    if (!path || path[0] != '/') {
-        return -EINVAL;
-    }
+    char upper[MAX_PATH_LEN];
+    char lower[MAX_PATH_LEN];
 
-    /* Build paths */
-    snprintf(upper_path, MAX_PATH_LEN, "%s%s", data->upper_dir, path);
-    snprintf(lower_path, MAX_PATH_LEN, "%s%s", data->lower_dir, path);
+    snprintf(upper, MAX_PATH_LEN, "%s%s", data->upper_dir, path);
+    snprintf(lower, MAX_PATH_LEN, "%s%s", data->lower_dir, path);
 
-    /* Check for whiteout file in upper dir */
-    const char *basename = strrchr(path, '/');
-    if (basename == NULL) basename = path;
-    else basename++;
+    /* check whiteout */
+    char *base = strrchr(path, '/');
+    base = base ? base + 1 : (char *)path;
 
-    /* Get parent directory properly */
-    strcpy(parent_upper, upper_path);
-    char *parent_ptr = parent_upper;
-    char *last_slash = strrchr(parent_ptr, '/');
-    if (last_slash != NULL) {
-        *last_slash = '\0';
-    }
+    char whiteout[MAX_PATH_LEN];
+    snprintf(whiteout, MAX_PATH_LEN, "%s/.wh.%s", data->upper_dir, base);
 
-    snprintf(whiteout_path, MAX_PATH_LEN, "%s/.wh.%s", parent_ptr, basename);
+    if (lstat(whiteout, &st) == 0) return -ENOENT;
 
-    if (lstat(whiteout_path, &st) == 0) {
-        /* Whiteout file exists - file is deleted */
-        *layer = 0;
-        return -ENOENT;
-    }
-
-    /* Check upper dir first (takes precedence) */
-    if (lstat(upper_path, &st) == 0) {
-        strcpy(resolved_path, upper_path);
+    if (lstat(upper, &st) == 0) {
+        strcpy(resolved, upper);
         *layer = 1;
         return 0;
     }
 
-    /* Check lower dir */
-    if (lstat(lower_path, &st) == 0) {
-        strcpy(resolved_path, lower_path);
+    if (lstat(lower, &st) == 0) {
+        strcpy(resolved, lower);
         *layer = 2;
         return 0;
     }
 
-    *layer = 0;
     return -ENOENT;
 }
 
-/**
- * Check if a file is whiteouted
- */
-int is_whiteouted(const char *path) {
+int ensure_parent(const char *path) {
     struct mini_unionfs_state *data = UNIONFS_DATA;
-    struct stat st;
-    char whiteout_path[MAX_PATH_LEN];
-    char parent_path[MAX_PATH_LEN];
-    
-    const char *basename = strrchr(path, '/');
-    if (basename == NULL) basename = path;
-    else basename++;
+    char full[MAX_PATH_LEN];
 
-    /* Get parent directory */
-    strcpy(parent_path, path);
-    char *last_slash = strrchr(parent_path, '/');
-    if (last_slash != NULL && last_slash != parent_path) {
-        *last_slash = '\0';
-    } else {
-        strcpy(parent_path, "/");
-    }
+    snprintf(full, MAX_PATH_LEN, "%s%s", data->upper_dir, path);
 
-    snprintf(whiteout_path, MAX_PATH_LEN, "%s/%s%s",
-             data->upper_dir, parent_path[1] ? parent_path : "", basename);
-
-    /* Handle root directory case */
-    if (strcmp(parent_path, "/") == 0) {
-        snprintf(whiteout_path, MAX_PATH_LEN, "%s/.wh.%s", data->upper_dir, basename);
-    } else {
-        snprintf(whiteout_path, MAX_PATH_LEN, "%s%s/.wh.%s", 
-                 data->upper_dir, parent_path, basename);
-    }
-
-    return (lstat(whiteout_path, &st) == 0) ? 1 : 0;
-}
-
-/**
- * Ensure all parent directories exist in upper_dir
- */
-int ensure_parent_dir(const char *path) {
-    struct mini_unionfs_state *data = UNIONFS_DATA;
-    char parent_upper[MAX_PATH_LEN];
-    char *p;
-    struct stat st;
-
-    /* Extract parent directory from path */
-    strcpy(parent_upper, data->upper_dir);
-    strcat(parent_upper, path);
-    
-    p = strrchr(parent_upper, '/');
-    if (p == NULL) return 0;
+    char *p = strrchr(full, '/');
+    if (!p) return 0;
     *p = '\0';
 
-    /* Check if parent exists */
-    if (lstat(parent_upper, &st) == 0) {
-        return 0;
-    }
-
-    /* Recursively create parent directories */
-    int ret = mkdir(parent_upper, 0755);
-    if (ret == -1 && errno != EEXIST) {
-        return -errno;
-    }
-
+    mkdir(full, 0755);
     return 0;
 }
 
-/**
- * Copy file from source to destination (for Copy-on-Write)
- */
-int copy_file(const char *src, const char *dest) {
-    int src_fd, dest_fd;
+int copy_file(const char *src, const char *dst) {
+    int in = open(src, O_RDONLY);
+    if (in < 0) return -errno;
+
+    int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (out < 0) return -errno;
+
     char buf[4096];
-    ssize_t bytes;
-    struct stat st;
-    char dest_dir_path[MAX_PATH_LEN];
+    int n;
 
-    /* Get source file stats */
-    if (stat(src, &st) == -1) {
-        return -errno;
-    }
+    while ((n = read(in, buf, sizeof(buf))) > 0)
+        write(out, buf, n);
 
-    /* Ensure parent directory exists */
-    strcpy(dest_dir_path, dest);
-    char *last_slash = strrchr(dest_dir_path, '/');
-    if (last_slash != NULL && last_slash != dest_dir_path) {
-        *last_slash = '\0';
-        struct stat dir_st;
-        if (lstat(dest_dir_path, &dir_st) != 0) {
-            mkdir(dest_dir_path, 0755);
-        }
-    }
-
-    /* Open source */
-    src_fd = open(src, O_RDONLY);
-    if (src_fd == -1) {
-        return -errno;
-    }
-
-    /* Create destination */
-    dest_fd = open(dest, O_WRONLY | O_CREAT | O_TRUNC, st.st_mode);
-    if (dest_fd == -1) {
-        close(src_fd);
-        return -errno;
-    }
-
-    /* Copy data */
-    while ((bytes = read(src_fd, buf, sizeof(buf))) > 0) {
-        if (write(dest_fd, buf, bytes) != bytes) {
-            close(src_fd);
-            close(dest_fd);
-            unlink(dest);
-            return -EIO;
-        }
-    }
-
-    close(src_fd);
-    close(dest_fd);
-
-    return (bytes == 0) ? 0 : -errno;
+    close(in);
+    close(out);
+    return 0;
 }
 
-/* ======================== FUSE Operations ======================== */
+/* ================= FUSE OPS ================= */
 
-static int unionfs_getattr(const char *path, struct stat *stbuf,
-                           struct fuse_file_info *fi) {
-    char resolved_path[MAX_PATH_LEN];
+int unionfs_getattr(const char *path, struct stat *stbuf) {
+    char resolved[MAX_PATH_LEN];
     int layer;
-    (void) fi;
 
-    int ret = resolve_path(path, resolved_path, &layer);
-    if (ret != 0) {
-        return ret;
-    }
+    int ret = resolve_path(path, resolved, &layer);
+    if (ret != 0) return ret;
 
-    ret = lstat(resolved_path, stbuf);
-    if (ret == -1) {
+    if (lstat(resolved, stbuf) == -1)
         return -errno;
+
+    return 0;
+}
+
+int unionfs_open(const char *path, struct fuse_file_info *fi) {
+    char resolved[MAX_PATH_LEN];
+    char upper[MAX_PATH_LEN];
+    int layer;
+
+    int ret = resolve_path(path, resolved, &layer);
+
+    if (ret != 0 && !(fi->flags & O_CREAT))
+        return ret;
+
+    if ((fi->flags & (O_WRONLY | O_RDWR)) && layer == 2) {
+        snprintf(upper, MAX_PATH_LEN, "%s%s", UNIONFS_DATA->upper_dir, path);
+        ensure_parent(path);
+        copy_file(resolved, upper);
     }
 
     return 0;
 }
 
-static int unionfs_open(const char *path, struct fuse_file_info *fi) {
-    struct mini_unionfs_state *data = UNIONFS_DATA;
-    char resolved_path[MAX_PATH_LEN];
-    char upper_path[MAX_PATH_LEN];
+int unionfs_read(const char *path, char *buf, size_t size,
+                 off_t offset, struct fuse_file_info *fi) {
+    char resolved[MAX_PATH_LEN];
     int layer;
 
-    int ret = resolve_path(path, resolved_path, &layer);
-    if (ret != 0) {
-        /* File doesn't exist - only allow write modes for creation */
-        if (fi->flags & O_CREAT) {
-            return 0;
-        }
-        return ret;
-    }
+    int ret = resolve_path(path, resolved, &layer);
+    if (ret != 0) return ret;
 
-    /* If opening for writing and file is in lower_dir, trigger CoW */
-    if ((fi->flags & (O_WRONLY | O_RDWR | O_APPEND)) && layer == 2) {
-        snprintf(upper_path, MAX_PATH_LEN, "%s%s", data->upper_dir, path);
-        
-        /* Ensure parent directory exists */
-        int parent_ret = ensure_parent_dir(path);
-        if (parent_ret != 0) {
-            return parent_ret;
-        }
-
-        /* Copy file from lower to upper */
-        int copy_ret = copy_file(resolved_path, upper_path);
-        if (copy_ret != 0) {
-            return copy_ret;
-        }
-
-        /* Update resolved path for subsequent operations */
-        strcpy(resolved_path, upper_path);
-    }
-
-    return 0;
-}
-
-static int unionfs_read(const char *path, char *buf, size_t size, off_t offset,
-                       struct fuse_file_info *fi) {
-    char resolved_path[MAX_PATH_LEN];
-    int layer;
-    int fd;
-    int ret;
-    (void) fi;
-
-    ret = resolve_path(path, resolved_path, &layer);
-    if (ret != 0) {
-        return ret;
-    }
-
-    fd = open(resolved_path, O_RDONLY);
-    if (fd == -1) {
-        return -errno;
-    }
+    int fd = open(resolved, O_RDONLY);
+    if (fd < 0) return -errno;
 
     ret = pread(fd, buf, size, offset);
     close(fd);
 
-    return (ret == -1) ? -errno : ret;
+    return ret;
 }
 
-static int unionfs_write(const char *path, const char *buf, size_t size,
-                        off_t offset, struct fuse_file_info *fi) {
-    struct mini_unionfs_state *data = UNIONFS_DATA;
-    char resolved_path[MAX_PATH_LEN];
-    char upper_path[MAX_PATH_LEN];
+int unionfs_write(const char *path, const char *buf, size_t size,
+                  off_t offset, struct fuse_file_info *fi) {
+    char resolved[MAX_PATH_LEN];
+    char upper[MAX_PATH_LEN];
     int layer;
-    int fd;
-    int ret;
-    (void) fi;
 
-    /* Check current state */
-    int resolve_ret = resolve_path(path, resolved_path, &layer);
-    
-    /* If file doesn't exist, we're creating it in upper */
-    if (resolve_ret != 0) {
-        snprintf(upper_path, MAX_PATH_LEN, "%s%s", data->upper_dir, path);
-        ensure_parent_dir(path);
-        fd = open(upper_path, O_WRONLY | O_CREAT, 0644);
-        if (fd == -1) {
-            return -errno;
-        }
-    } 
-    /* If file is in lower_dir, trigger CoW */
-    else if (layer == 2) {
-        snprintf(upper_path, MAX_PATH_LEN, "%s%s", data->upper_dir, path);
-        ensure_parent_dir(path);
-        copy_file(resolved_path, upper_path);
-        fd = open(upper_path, O_WRONLY);
-        if (fd == -1) {
-            return -errno;
-        }
-    } 
-    /* File is in upper_dir */
-    else {
-        fd = open(resolved_path, O_WRONLY);
-        if (fd == -1) {
-            return -errno;
-        }
+    int ret = resolve_path(path, resolved, &layer);
+
+    snprintf(upper, MAX_PATH_LEN, "%s%s", UNIONFS_DATA->upper_dir, path);
+    ensure_parent(path);
+
+    if (ret != 0 || layer == 2) {
+        if (ret == 0)
+            copy_file(resolved, upper);
+
+        int fd = open(upper, O_WRONLY | O_CREAT, 0644);
+        if (fd < 0) return -errno;
+
+        ret = pwrite(fd, buf, size, offset);
+        close(fd);
+        return ret;
     }
+
+    int fd = open(resolved, O_WRONLY);
+    if (fd < 0) return -errno;
 
     ret = pwrite(fd, buf, size, offset);
     close(fd);
 
-    return (ret == -1) ? -errno : ret;
+    return ret;
 }
 
-static int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
-                          off_t offset, struct fuse_file_info *fi) {
-    struct mini_unionfs_state *data = UNIONFS_DATA;
-    char upper_path[MAX_PATH_LEN];
-    char lower_path[MAX_PATH_LEN];
-    DIR *upper_dir = NULL;
-    DIR *lower_dir = NULL;
+int unionfs_readdir(const char *path, void *buf,
+                    fuse_fill_dir_t filler, off_t offset,
+                    struct fuse_file_info *fi) {
+
+    char upper[MAX_PATH_LEN];
+    char lower[MAX_PATH_LEN];
+    DIR *dir;
     struct dirent *entry;
+    struct stat st;
+
     (void) offset;
     (void) fi;
 
-    snprintf(upper_path, MAX_PATH_LEN, "%s%s", data->upper_dir, path);
-    snprintf(lower_path, MAX_PATH_LEN, "%s%s", data->lower_dir, path);
-
-    /* List entries from both directories, avoiding duplicates */
-    /* We need to merge the directories and handle whiteouts */
-    
-    if (strcmp(path, "/") == 0) {
-        snprintf(upper_path, MAX_PATH_LEN, "%s", data->upper_dir);
-        snprintf(lower_path, MAX_PATH_LEN, "%s", data->lower_dir);
-    }
-
-    upper_dir = opendir(upper_path);
-    lower_dir = opendir(lower_path);
+    snprintf(upper, MAX_PATH_LEN, "%s%s", UNIONFS_DATA->upper_dir, path);
+    snprintf(lower, MAX_PATH_LEN, "%s%s", UNIONFS_DATA->lower_dir, path);
 
     filler(buf, ".", NULL, 0);
     filler(buf, "..", NULL, 0);
 
-    /* List from upper */
-    if (upper_dir != NULL) {
-        while ((entry = readdir(upper_dir)) != NULL) {
-            if (entry->d_name[0] == '\0') continue;
-
-            /* Skip whiteout files */
-            if (strncmp(entry->d_name, WHITEOUT_PREFIX, strlen(WHITEOUT_PREFIX)) == 0) {
+    /* upper */
+    dir = opendir(upper);
+    if (dir) {
+        while ((entry = readdir(dir)) != NULL) {
+            if (strncmp(entry->d_name, WHITEOUT_PREFIX, 4) == 0)
                 continue;
-            }
-
             filler(buf, entry->d_name, NULL, 0);
         }
-        closedir(upper_dir);
+        closedir(dir);
     }
 
-    /* List from lower, avoiding duplicates */
-    if (lower_dir != NULL) {
-        while ((entry = readdir(lower_dir)) != NULL) {
-            if (entry->d_name[0] == '\0') continue;
+    /* lower */
+    dir = opendir(lower);
+    if (dir) {
+        while ((entry = readdir(dir)) != NULL) {
 
-            /* Check if entry exists in upper_dir or is whiteouted */
-            char check_upper[MAX_PATH_LEN];
-            struct stat st;
-            
-            snprintf(check_upper, MAX_PATH_LEN, "%s/%s", upper_path, entry->d_name);
-            
-            /* Skip if exists in upper */
-            if (lstat(check_upper, &st) == 0) {
-                continue;
-            }
+            char check[MAX_PATH_LEN];
+            snprintf(check, MAX_PATH_LEN, "%s/%s", upper, entry->d_name);
 
-            /* Skip if whiteouted */
-            char whiteout_check[MAX_PATH_LEN];
-            snprintf(whiteout_check, MAX_PATH_LEN, "%s/.wh.%s", 
-                     upper_path, entry->d_name);
-            if (lstat(whiteout_check, &st) == 0) {
-                continue;
-            }
+            if (lstat(check, &st) == 0) continue;
+
+            char wh[MAX_PATH_LEN];
+            snprintf(wh, MAX_PATH_LEN, "%s/.wh.%s", upper, entry->d_name);
+
+            if (lstat(wh, &st) == 0) continue;
 
             filler(buf, entry->d_name, NULL, 0);
         }
-        closedir(lower_dir);
+        closedir(dir);
     }
 
     return 0;
 }
 
-static int unionfs_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
-    struct mini_unionfs_state *data = UNIONFS_DATA;
-    char upper_path[MAX_PATH_LEN];
-    int fd;
-    (void) fi;
+int unionfs_unlink(const char *path) {
+    char resolved[MAX_PATH_LEN];
+    char upper[MAX_PATH_LEN];
+    int layer;
 
-    snprintf(upper_path, MAX_PATH_LEN, "%s%s", data->upper_dir, path);
+    int ret = resolve_path(path, resolved, &layer);
+    if (ret != 0) return ret;
 
-    /* Ensure parent directory exists */
-    int ret = ensure_parent_dir(path);
-    if (ret != 0) {
-        return ret;
-    }
+    snprintf(upper, MAX_PATH_LEN, "%s%s", UNIONFS_DATA->upper_dir, path);
 
-    fd = open(upper_path, O_WRONLY | O_CREAT | O_EXCL, mode);
-    if (fd == -1) {
-        return -errno;
-    }
+    if (layer == 1)
+        return unlink(upper);
+
+    /* create whiteout */
+    char *base = strrchr(path, '/');
+    base = base ? base + 1 : (char *)path;
+
+    char wh[MAX_PATH_LEN];
+    snprintf(wh, MAX_PATH_LEN, "%s/.wh.%s", UNIONFS_DATA->upper_dir, base);
+
+    int fd = open(wh, O_CREAT, 0644);
+    close(fd);
+
+    return 0;
+}
+
+int unionfs_create(const char *path, mode_t mode,
+                   struct fuse_file_info *fi) {
+    char upper[MAX_PATH_LEN];
+
+    snprintf(upper, MAX_PATH_LEN, "%s%s", UNIONFS_DATA->upper_dir, path);
+    ensure_parent(path);
+
+    int fd = open(upper, O_CREAT | O_WRONLY, mode);
+    if (fd < 0) return -errno;
 
     close(fd);
     return 0;
 }
 
-static int unionfs_unlink(const char *path) {
-    struct mini_unionfs_state *data = UNIONFS_DATA;
-    char resolved_path[MAX_PATH_LEN];
-    char upper_path[MAX_PATH_LEN];
-    char whiteout_path[MAX_PATH_LEN];
-    char parent_upper[MAX_PATH_LEN];
-    int layer;
-    int ret;
+/* ================= OPS ================= */
 
-    ret = resolve_path(path, resolved_path, &layer);
-    if (ret != 0) {
-        return ret;
-    }
-
-    /* File is in upper_dir - just unlink it */
-    if (layer == 1) {
-        snprintf(upper_path, MAX_PATH_LEN, "%s%s", data->upper_dir, path);
-        return (unlink(upper_path) == -1) ? -errno : 0;
-    }
-
-    /* File is in lower_dir - create whiteout file */
-    if (layer == 2) {
-        snprintf(upper_path, MAX_PATH_LEN, "%s%s", data->upper_dir, path);
-        
-        /* Ensure parent directory exists */
-        int parent_ret = ensure_parent_dir(path);
-        if (parent_ret != 0) {
-            return parent_ret;
-        }
-
-        /* Create whiteout file */
-        const char *basename = strrchr(path, '/');
-        if (basename == NULL) basename = path;
-        else basename++;
-
-        strcpy(parent_upper, upper_path);
-        char *last_slash = strrchr(parent_upper, '/');
-        if (last_slash != NULL) {
-            *last_slash = '\0';
-        }
-        
-        snprintf(whiteout_path, MAX_PATH_LEN, "%s/.wh.%s",
-                 parent_upper, basename);
-
-        int fd = open(whiteout_path, O_WRONLY | O_CREAT, 0644);
-        if (fd == -1) {
-            return -errno;
-        }
-        close(fd);
-        return 0;
-    }
-
-    return -ENOENT;
-}
-
-static int unionfs_mkdir(const char *path, mode_t mode) {
-    struct mini_unionfs_state *data = UNIONFS_DATA;
-    char upper_path[MAX_PATH_LEN];
-    char resolved_path[MAX_PATH_LEN];
-    int layer;
-
-    snprintf(upper_path, MAX_PATH_LEN, "%s%s", data->upper_dir, path);
-
-    /* Ensure parent directory exists */
-    int ret = ensure_parent_dir(path);
-    if (ret != 0) {
-        return ret;
-    }
-
-    /* Check if directory already exists */
-    if (resolve_path(path, resolved_path, &layer) == 0) {
-        struct stat st;
-        if (lstat(resolved_path, &st) == 0 && S_ISDIR(st.st_mode)) {
-            return -EEXIST;
-        }
-    }
-
-    return (mkdir(upper_path, mode) == -1) ? -errno : 0;
-}
-
-static int unionfs_rmdir(const char *path) {
-    struct mini_unionfs_state *data = UNIONFS_DATA;
-    char resolved_path[MAX_PATH_LEN];
-    char upper_path[MAX_PATH_LEN];
-    int layer;
-
-    int ret = resolve_path(path, resolved_path, &layer);
-    if (ret != 0) {
-        return ret;
-    }
-
-    snprintf(upper_path, MAX_PATH_LEN, "%s%s", data->upper_dir, path);
-
-    /* Directory must be in upper to be removed (or create whiteout) */
-    if (layer == 1) {
-        return (rmdir(upper_path) == -1) ? -errno : 0;
-    }
-
-    /* If in lower, a whiteout is complex for directories - allow removal of empty upper */
-    if (layer == 2) {
-        /* For now, treat like unlink - create a whiteout marker */
-        return unionfs_unlink(path);
-    }
-
-    return -ENOENT;
-}
-
-static int unionfs_rename(const char *from, const char *to) {
-    struct mini_unionfs_state *data = UNIONFS_DATA;
-    char from_resolved[MAX_PATH_LEN];
-    char to_upper[MAX_PATH_LEN];
-    int layer;
-
-    int ret = resolve_path(from, from_resolved, &layer);
-    if (ret != 0) {
-        return ret;
-    }
-
-    snprintf(to_upper, MAX_PATH_LEN, "%s%s", data->upper_dir, to);
-
-    /* If from is in lower, copy to upper first (CoW) */
-    if (layer == 2) {
-        ensure_parent_dir(to);
-        copy_file(from_resolved, to_upper);
-    } else if (layer == 1) {
-        /* Rename within upper */
-        char from_upper[MAX_PATH_LEN];
-        snprintf(from_upper, MAX_PATH_LEN, "%s%s", data->upper_dir, from);
-        return (rename(from_upper, to_upper) == -1) ? -errno : 0;
-    }
-
-    return 0;
-}
-
-static int unionfs_truncate(const char *path, off_t size) {
-    struct mini_unionfs_state *data = UNIONFS_DATA;
-    char resolved_path[MAX_PATH_LEN];
-    char upper_path[MAX_PATH_LEN];
-    int layer;
-
-    int ret = resolve_path(path, resolved_path, &layer);
-    if (ret != 0) {
-        return ret;
-    }
-
-    snprintf(upper_path, MAX_PATH_LEN, "%s%s", data->upper_dir, path);
-
-    /* If in lower, trigger CoW */
-    if (layer == 2) {
-        ensure_parent_dir(path);
-        copy_file(resolved_path, upper_path);
-    }
-
-    return (truncate(upper_path, size) == -1) ? -errno : 0;
-}
-
-static int unionfs_release(const char *path, struct fuse_file_info *fi) {
-    (void) path;
-    (void) fi;
-    return 0;
-}
-
-/* ======================== FUSE Operations Table ======================== */
-
-static const struct fuse_operations unionfs_oper = {
+static struct fuse_operations ops = {
     .getattr = unionfs_getattr,
     .open = unionfs_open,
     .read = unionfs_read,
     .write = unionfs_write,
     .readdir = unionfs_readdir,
-    .create = unionfs_create,
     .unlink = unionfs_unlink,
-    .mkdir = unionfs_mkdir,
-    .rmdir = unionfs_rmdir,
-    .rename = unionfs_rename,
-    .truncate = unionfs_truncate,
-    .release = unionfs_release,
+    .create = unionfs_create,
 };
 
-/* ======================== Main ======================== */
+/* ================= MAIN ================= */
 
 int main(int argc, char *argv[]) {
     if (argc < 4) {
-        fprintf(stderr, "Usage: %s <lower_dir> <upper_dir> <mount_point> [fuse_options]\n", argv[0]);
+        printf("Usage: %s lower upper mount\n", argv[0]);
         return 1;
     }
 
-    struct mini_unionfs_state *state = malloc(sizeof(struct mini_unionfs_state));
-    if (!state) {
-        perror("malloc");
-        return 1;
-    }
+    struct mini_unionfs_state *state = malloc(sizeof(*state));
 
     state->lower_dir = realpath(argv[1], NULL);
     state->upper_dir = realpath(argv[2], NULL);
 
-    if (!state->lower_dir || !state->upper_dir) {
-        perror("realpath");
-        return 1;
-    }
-
-    printf("Mini-UnionFS mounted:\n");
-    printf("  Lower (read-only): %s\n", state->lower_dir);
-    printf("  Upper (read-write): %s\n", state->upper_dir);
-    printf("  Mount point: %s\n", argv[3]);
-
-    /* Prepare FUSE arguments */
-    int new_argc = argc - 2;
-    char **new_argv = malloc((new_argc + 1) * sizeof(char *));
-    new_argv[0] = argv[0];
-    new_argv[1] = argv[3];
-    for (int i = 2; i < argc - 1; i++) {
-        new_argv[i] = argv[i + 2];
-    }
-    new_argv[new_argc] = NULL;
-
-    return fuse_main(new_argc, new_argv, &unionfs_oper, state);
+    return fuse_main(argc - 2, argv + 2, &ops, state);
 }

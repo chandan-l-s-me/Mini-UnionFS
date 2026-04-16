@@ -1,43 +1,19 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -g
-FUSE_CFLAGS = $(shell pkg-config --cflags fuse)
-FUSE_LIBS = $(shell pkg-config --libs fuse)
 
-INCLUDE_DIR = include
-SRC_DIR = src
-BUILD_DIR = build
+CFLAGS = -Wall -Wextra -O2 -g -D_FILE_OFFSET_BITS=64 $(shell pkg-config fuse --cflags)
+LDFLAGS = $(shell pkg-config fuse --libs)
 
-TARGET = mini_unionfs
-SOURCES = $(SRC_DIR)/mini_unionfs.c
-OBJECTS = $(BUILD_DIR)/mini_unionfs.o
+SRC = src/mini_unionfs.c
+OBJ = build/mini_unionfs.o
 
-.PHONY: all clean install uninstall help test
+all: mini_unionfs
 
-all: $(TARGET)
+mini_unionfs: $(OBJ)
+	$(CC) $(CFLAGS) -o mini_unionfs $(OBJ) $(LDFLAGS)
 
-$(BUILD_DIR):
-	mkdir -p $(BUILD_DIR)
-
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(FUSE_CFLAGS) -I$(INCLUDE_DIR) -c $< -o $@
-
-$(TARGET): $(OBJECTS)
-	$(CC) $(CFLAGS) $(FUSE_CFLAGS) -o $@ $^ $(FUSE_LIBS)
-	@echo "Build successful: $(TARGET)"
+build/mini_unionfs.o: $(SRC)
+	mkdir -p build
+	$(CC) $(CFLAGS) -c $(SRC) -o $(OBJ)
 
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET)
-	@echo "Cleaned build artifacts"
-
-test: $(TARGET)
-	@bash tests/test_unionfs.sh
-
-help:
-	@echo "Mini-UnionFS Makefile"
-	@echo "Usage:"
-	@echo "  make                - Build the project"
-	@echo "  make clean          - Remove build artifacts"
-	@echo "  make test           - Run test suite"
-	@echo "  make help           - Show this help message"
-
-.DEFAULT_GOAL := all
+	rm -rf build mini_unionfs
